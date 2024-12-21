@@ -81,11 +81,13 @@ uint8_t font[96][8] = {
 };
 
 // Floppy disk structure
+#define SECTOR_SIZE 0x100
+#define TRACKS 35
+#define SECTORS_PER_TRACK 16
+
 typedef struct {
-    uint8_t *data;
-    size_t size;
-    size_t current_track;
-    size_t current_sector;
+    uint8_t *data; // Raw floppy disk data
+    size_t size;   // Size of the disk image
 } FloppyDisk;
 
 FloppyDisk floppy;
@@ -106,7 +108,7 @@ void init_sdl() {
 
 // Draw a single character
 void draw_char(uint8_t ch, int x, int y) {
-    if (ch < 0x20 || ch > 0x7F) return; // Only render printable characters
+    if (ch < 0x20 || ch > 0x7F) return;
     ch -= 0x20; // Adjust index to match font array
 
     for (int row = 0; row < CHAR_HEIGHT; row++) {
@@ -135,18 +137,15 @@ void render_screen() {
         return;
     }
 
-    // Clear the screen
     memset(screen->pixels, 0, screen->w * screen->h * sizeof(uint32_t));
 
-    // Render text mode memory (0x0400 - 0x07FF)
     for (int row = 0; row < TEXT_ROWS; row++) {
         for (int col = 0; col < TEXT_COLS; col++) {
             uint16_t addr = 0x0400 + row * TEXT_COLS + col;
             uint8_t ch = memory[addr];
 
-            // Handle invalid characters gracefully
             if (ch < 0x20 || ch > 0x7F) {
-                ch = 0x41; // Display space for invalid characters
+                ch = 0x41; // Default to 'A' for invalid characters
             }
 
             draw_char(ch, col * CHAR_WIDTH, row * CHAR_HEIGHT);
@@ -183,6 +182,9 @@ void load_rom(const char *filename) {
     }
     fread(&memory[0xD000], 1, 0x3000, file); // Load ROM at $D000-$FFFF
     fclose(file);
+    for (int i = 0xD000; i <= 0xD0FF; i++) {
+    printf("ROM[%04X] = %02X\n", i, memory[i]);
+        }
 }
 
 // Reset CPU
@@ -231,15 +233,10 @@ void execute_instruction() {
 
         case 0x00: // BRK
         {
-            // Push PC and status register onto the stack
             push_byte((cpu.pc >> 8) & 0xFF);
             push_byte(cpu.pc & 0xFF);
             push_byte(cpu.status | FLAG_BREAK);
-
-            // Set the interrupt disable flag
             cpu.status |= FLAG_INTERRUPT;
-
-            // Jump to the interrupt vector at $FFFE-$FFFF
             cpu.pc = memory[0xFFFE] | (memory[0xFFFF] << 8);
             break;
         }
@@ -272,7 +269,7 @@ void load_floppy(const char *filename) {
     floppy.size = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-    floppy.data = malloc(floppy.size);
+    floppy.data = (uint8_t *)malloc(floppy.size);
     if (!floppy.data) {
         perror("Failed to allocate memory for floppy disk");
         exit(1);
@@ -280,32 +277,42 @@ void load_floppy(const char *filename) {
 
     fread(floppy.data, 1, floppy.size, file);
     fclose(file);
-
-    printf("Floppy disk loaded: %s, size: %zu bytes\n", filename, floppy.size);
 }
 
-// Function to handle the selected interface (floppy, cassette, etc.)
-void handle_interface(const char *interface, const char *floppy_image) {
-    if (strcmp(interface, "floppy") == 0) {
-        printf("Using floppy disk interface.\n");
-        load_floppy(floppy_image);
-    } else {
-        printf("Unknown interface: %s. Defaulting to floppy disk.\n", interface);
-        load_floppy(floppy_image);
+// Function to read a sector from the floppy disk
+void read_sector(uint8_t *buffer, uint8_t track, uint8_t sector) {
+    uint32_t sector_start = (track * SECTORS_PER_TRACK + sector) * SECTOR_SIZE;
+    if (sector_start + SECTOR_SIZE > floppy.size) {
+        printf("Error: Trying to read past the end of the floppy disk.\n");
+        exit(1);
     }
+
+    memcpy(buffer, floppy.data + sector_start, SECTOR_SIZE);
+}
+
+// Function to boot from floppy (simplified)
+void boot_from_floppy() {
+    uint8_t boot_sector[SECTOR_SIZE];
+    read_sector(boot_sector, 0, 0); // Read the first sector (boot sector)
+    uint16_t boot_address = boot_sector[0x1FF] | (boot_sector[0x1FE] << 8);
+    cpu.pc = boot_address;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <rom-file> <floppy-image>\n", argv[0]);
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <rom-file> [floppy-image]\n", argv[0]);
         return 1;
     }
 
     init_sdl();
     load_rom(argv[1]);
-    load_floppy(argv[2]);
+
+    if (argc > 2) {
+        load_floppy(argv[2]);
+        boot_from_floppy(); // Boot from floppy if provided
+    }
+
     reset_cpu();
-    handle_interface("floppy", argv[2]);
     run();
 
     return 0;
